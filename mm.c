@@ -82,6 +82,7 @@ void setSucc(size_t* head, size_t* ptr){*(head + 2) = ptr;}
 size_t* nextBlock(size_t *head){return head + blockSize(head) / SIZE_T_SIZE;}
 size_t* prevBlock(size_t* head){return head - blockSize(head - 1) / SIZE_T_SIZE;}
 int atEpilogue(size_t* ptr){return (allocStatus(ptr) == ALLOCATED) && (blockSize(ptr) == 0);}
+int endOfList(size_t* block){return (getSucc(block) == NULL);}
 void changeHead(size_t* head, size_t size, int alloc_op)
 {
     *head = size;
@@ -105,7 +106,7 @@ void insertFreeBlock(size_t* free_list, size_t* block);
 int mm_init(void)
 {
     mem_init();    
-    mem_sbrk(SIZE_T_SIZE * 5);
+    mem_sbrk(SIZE_T_SIZE * 9);
     
     size_t* epilogue = (size_t *)mem_heap_hi();
     epilogue = (char *)(epilogue) + 1; 
@@ -114,10 +115,16 @@ int mm_init(void)
 
     free_list_h = ((size_t*) mem_heap_lo());   
 
-    setBlockSize(free_list_h, MINBLOCKSIZE);  /*sentinel block*/
+    setBlockSize(free_list_h, MINBLOCKSIZE);  /*sentinel head*/
     setAllocStatus(free_list_h, ALLOCATED);
     setPred(free_list_h, NULL);
-    setSucc(free_list_h, epilogue);
+    setSucc(free_list_h, nextBlock(free_list_h));
+
+    size_t* free_list_t = nextBlock(free_list_h);
+    setBlockSize(free_list_t, MINBLOCKSIZE);  /*sentinel tail*/
+    setAllocStatus(free_list_t, ALLOCATED);
+    setPred(free_list_t, free_list_h);
+    setSucc(free_list_t, NULL);
 
     return 0;
 }
@@ -128,20 +135,22 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
+    print_free_list();
+
     if(size == 0)        /*spurious requests*/
         return NULL; 
     int newsize = ALIGN(size + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE); /*header, footer, pred, succ*/
 
     /*policy: first-fit*/
     size_t* ptr = free_list_h;    
-    while (!(atEpilogue(ptr)) &&                                   /*boundary check*/
+    while (!(endOfList(ptr)) &&                                   /*boundary check*/
            (allocStatus(ptr) == ALLOCATED ||                           /*while not yet found a free block*/
             blockSize(ptr) < newsize))                                 /*or block does not fit*/
     {
         ptr = getSucc(ptr);   /*get to next free block*/
     }
     
-    if (atEpilogue(ptr) == 1)           /*end of heap, request more VM*/
+    if (endOfList(ptr))           /*end of free list, request more VM*/
     {
         void *p = mem_sbrk(newsize); 
         if (p == (void *)-1)
@@ -154,7 +163,7 @@ void *mm_malloc(size_t size)
             
             /*new epilogue*/
             *(nextBlock(new_mem)) = 0x1;
-            
+
             new_mem = (size_t*) (coalesce(new_mem));
             split(blockSize(new_mem), newsize, new_mem);
             
@@ -262,15 +271,6 @@ void split(size_t total, size_t taken, size_t* taken_blk)
         if(taken_blk_alloc_status == FREE)
         {
             splice(taken_blk);
-
-            /*this is for address-ordered free list*/
-            /*size_t* prev_free = getPred(taken_blk);
-            size_t* next_free = getSucc(taken_blk);
-            setSucc(prev_free, remains_blk);            
-            setPred(remains_blk, prev_free);
-            if(!atEpilogue(next_free))
-                setPred(next_free, remains_blk);
-            setSucc(remains_blk, next_free);*/
         }
         insertFreeBlock(free_list_h, remains_blk); /*both alloc and realloc returns the remaining memory to head of free list*/
   
@@ -348,8 +348,7 @@ void insertFreeBlock(size_t* free_list, size_t* block)
 {
     size_t* cur_first_block = getSucc(free_list);
     setSucc(block, cur_first_block);
-    if(!atEpilogue(cur_first_block))
-        setPred(cur_first_block, block);
+    setPred(cur_first_block, block);
     setSucc(free_list, block);
     setPred(block, free_list);
 }
@@ -359,19 +358,23 @@ void splice(size_t* block)
     size_t* pred = getPred(block);
     size_t* succ = getSucc(block);
     setSucc(pred, succ);
-    if(!atEpilogue(succ))
-        setPred(succ, pred);
+    setPred(succ, pred);
 }
 
 void print_free_list()
 {
+    static int cnt = 0;
+    if (cnt >= 100)
+        return;
+    cnt++;
+
     size_t* ptr = free_list_h;
-    while (!atEpilogue(ptr))
+    while (!endOfList(ptr))
     {
         printf("%d -> ",ptr);
         ptr = getSucc(ptr);
     }
-    printf("EPL\n");
+    printf("EOL\n");
 }
 
 int mm_check(void)
@@ -380,6 +383,15 @@ int mm_check(void)
     
 }
 
+
+
+/*ALLOC-SPLIT FOR ADDRESS-ORDERED FREE LIST*/
+/*size_t* prev_free = getPred(taken_blk);
+size_t* next_free = getSucc(taken_blk);
+setSucc(prev_free, remains_blk);            
+setPred(remains_blk, prev_free);
+setPred(next_free, remains_blk);
+setSucc(remains_blk, next_free);*/
 
 
 /*OPTIMIZATION FOR REALLOC WHICH CONSIDERS PREV BLOCK AS WELL*/
