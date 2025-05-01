@@ -45,7 +45,7 @@ team_t team = {
 
 #define ALLOCATED 1
 #define FREE 0
-#define MINBLOCKSIZE (SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE)
+#define MINBLOCKSIZE (SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE) /*header, footer, pred, succ*/
 #define BINCOUNT 20
 
 size_t* bins [BINCOUNT];    /*segregated free list bins*/
@@ -75,21 +75,22 @@ void setAllocStatus(size_t* head, int alloc_status)
     } 
 }
 
+size_t* nextBlock(size_t *head){return head + blockSize(head) / SIZE_T_SIZE;}
+size_t* prevBlock(size_t* head){return head - blockSize(head - 1) / SIZE_T_SIZE;}
+
 size_t* getPred(size_t* head){return (size_t*) (*(head + 1));}
 size_t* getSucc(size_t* head){return (size_t*) (*(head + 2));}
 void setPred(size_t* head, size_t* ptr){*(head + 1) = ptr;}
 void setSucc(size_t* head, size_t* ptr){*(head + 2) = ptr;}
 
-size_t* nextBlock(size_t *head){return head + blockSize(head) / SIZE_T_SIZE;}
-size_t* prevBlock(size_t* head){return head - blockSize(head - 1) / SIZE_T_SIZE;}
-int atEpilogue(size_t* ptr){return (allocStatus(ptr) == ALLOCATED) && (blockSize(ptr) == 0);}
-int endOfList(size_t* block){return (getSucc(block) == NULL);}
+int endOfList(size_t* head){return (getSucc(head) == NULL);}
+int atEpilogue(size_t* head){return (allocStatus(head) == ALLOCATED) && (blockSize(head) == 0);}
 
 /*key functions' signatures*/
 void allocSplit(size_t total, size_t taken, size_t* taken_blk);
 void* coalesce(size_t* to_free);
-void splice(size_t* block);
-void insertFreeBlock(size_t* free_list, size_t* block);
+void splice(size_t* head);  /*reconnect the predecessor and the successor of a block*/
+void insertFreeBlock(size_t* free_list, size_t* head);
 int findBin(size_t size);
 
 /*
@@ -98,6 +99,7 @@ int findBin(size_t size);
 int mm_init(void)
 {
     mem_init();    
+
     /*4 for head, foot, pred, succ of sentinel, 2 sentinels head and tail, BINCOUNT of those for BINCOUNT free lists, plus one for epilogue*/
     mem_sbrk(MINBLOCKSIZE * 2 * BINCOUNT + SIZE_T_SIZE); 
     
@@ -105,18 +107,24 @@ int mm_init(void)
     size_t* epilogue = (size_t *)mem_heap_hi();
     epilogue = (char *)(epilogue) + 1; 
     epilogue = epilogue - 1;
-    *epilogue = 0x1; /*allocated with size 0*/
+    *epilogue = 0x1;                /*epilogue is allocated with size 0*/
 
     for(int i = 0; i < BINCOUNT; i++)
     {
-        bins[i] = ((size_t*) mem_heap_lo()) + (MINBLOCKSIZE * 2 * i) / SIZE_T_SIZE;   
-        setBlockSize(bins[i], MINBLOCKSIZE);  /*sentinel head*/
+        /*get sentinel head*/
+        bins[i] = ((size_t*) mem_heap_lo()) + (MINBLOCKSIZE * 2 * i) / SIZE_T_SIZE;  
+        
+        /*initialize sentinel head*/
+        setBlockSize(bins[i], MINBLOCKSIZE);  
         setAllocStatus(bins[i], ALLOCATED);
         setPred(bins[i], NULL);
         setSucc(bins[i], nextBlock(bins[i]));
 
+        /*get sentinel tail*/
         size_t* free_list_t = nextBlock(bins[i]);
-        setBlockSize(free_list_t, MINBLOCKSIZE);  /*sentinel tail*/
+
+        /*initialize sentinel tail*/
+        setBlockSize(free_list_t, MINBLOCKSIZE); 
         setAllocStatus(free_list_t, ALLOCATED);
         setPred(free_list_t, bins[i]);
         setSucc(free_list_t, NULL);
@@ -132,8 +140,8 @@ void *mm_malloc(size_t size)
 {
     if(size == 0)        /*spurious requests*/
         return NULL; 
-    int newsize = ALIGN(size + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE); /*header, footer, pred, succ*/
-    int starting_bin = findBin(newsize);        /*the smallest bin that a search for free blocks starts from*/
+    int newsize = ALIGN(size + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE); /*align with header, footer, pred, succ*/
+    int starting_bin = findBin(newsize);                                /*the smallest bin that a search for free blocks starts from*/
 
     for (int b = starting_bin; b < BINCOUNT; b++)
     {
@@ -142,40 +150,41 @@ void *mm_malloc(size_t size)
             (allocStatus(blk) == ALLOCATED ||                           /*while not yet found a free block*/
                 blockSize(blk) < newsize))                              /*or block does not fit*/
         {
-            blk = getSucc(blk);   /*get to next free block*/
+            blk = getSucc(blk);                                         /*get to next free block*/
         }
         
         /*found a free large enough block*/
         if (allocStatus(blk) == FREE && blockSize(blk) >= newsize) 
         {
-            splice(blk);                                /*fix ptr's free list*/
+            splice(blk);                                     /*take blk out of its free list, reconnecting its predecessor with its successor*/
             allocSplit(blockSize(blk), newsize, blk);        /*allocate it and split if necessary*/
-            return (void *)((size_t*)blk + 1);          /*return start of payload*/
+            return (void *)((size_t*)blk + 1);               /*return start of payload*/
         }
     }
 
     /*reaching here means there are no free blocks available, requesting more memory*/
     void* new_mem = mem_sbrk(newsize); 
-    if (new_mem == (void *)-1)
+    if (new_mem == (void*) - 1)                     /*memory request failed*/
         return NULL;
     else
     {
+        /*initialize the newly allocated memory*/
         setBlockSize(new_mem, newsize);
-        setAllocStatus(new_mem, FREE);      /*new mem free, will be coalesced*/
+        setAllocStatus(new_mem, FREE);     
         
         /*new epilogue*/
         *(nextBlock(new_mem)) = 0x1;
         
-        new_mem = (size_t*) (coalesce(new_mem));        /*coalesce new free memory*/
-        splice(new_mem);                                /*fix new_mem's free list*/
-        allocSplit(blockSize(new_mem), newsize, new_mem);    /*allocate it and split if necessary*/
-        return (void *)((size_t*)(new_mem) + 1);        /*return start of payload*/
+        new_mem = (size_t*) (coalesce(new_mem));                /*coalesce new free block with any adjacent free blocks*/
+        splice(new_mem);                                        /*take new_mem out of its free list, reconnecting its predecessor with its successor*/
+        allocSplit(blockSize(new_mem), newsize, new_mem);       /*allocate it and split if necessary*/
+        return (void *)((size_t*)(new_mem) + 1);                /*return start of payload*/
     }
 }
 
 
 /*
- * mm_free - Freeing a block does nothing.
+ * mm_free - Free a block and coalesce with any adjacent free blocks.
  */
 void mm_free(void *ptr)
 {
@@ -184,13 +193,18 @@ void mm_free(void *ptr)
 }
 
 /*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
+ * mm_realloc - Implemented in terms of mm_malloc and mm_free. 
+Support three cases:
+1. Block shrinks
+2. Block gets bigger and there is adjacent free memory to contain it.
+3. Other cases: malloc a new block, copy current block to new block, and free the current block.
  */
 void *mm_realloc(void *ptr, size_t size)
 {
     if (ptr == NULL)                /*realloc a NULL block is equivalent to malloc a new block*/
         return mm_malloc(size);
-    if (size == 0)                  /*realloc to size 0 is free*/
+        
+    if (size == 0)                  /*realloc to size 0 is equivalent to free*/
     {
         mm_free(ptr);
         return (void *)NULL;
@@ -199,7 +213,7 @@ void *mm_realloc(void *ptr, size_t size)
     size_t newsize = ALIGN(size + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE + SIZE_T_SIZE);
     size_t* blk = (size_t*)(ptr - SIZE_T_SIZE);
 
-    if (blockSize(blk) < newsize)   /*unlike in malloc, blk is ALLOCATED*/
+    if (blockSize(blk) < newsize)
     {
         /*if next free block (if any) enough to hold newsize -> realloc in place*/
         if (allocStatus(nextBlock(blk)) == FREE && blockSize(blk) + blockSize(nextBlock(blk)) >= newsize)
@@ -210,16 +224,14 @@ void *mm_realloc(void *ptr, size_t size)
             /*splice free next block*/
             splice(next_block_head);
             
+            /*change the block size accordingly and split it if necessary*/
             setBlockSize(blk, merged_block_size); 
             setAllocStatus(blk, ALLOCATED);
             allocSplit(merged_block_size, newsize, blk);
-                    
             return ptr;
         }
 
-        /*all other cases: malloc a new block, 
-        copy current block to this new block,
-        and free current block*/
+        /*malloc a new block, copy current block to this new block, and free current block*/
         else
         {
             void* new_block = mm_malloc(newsize);
@@ -229,14 +241,18 @@ void *mm_realloc(void *ptr, size_t size)
         }
     }
 
-    /*block shrinks -> free the remaining memory . Only split if remaining is at least MINBLOCKSIZE */
+    /*block shrinks -> free the remaining memory; only split if remaining is at least MINBLOCKSIZE */
     else if (blockSize(blk) > newsize && blockSize(blk) - newsize >= MINBLOCKSIZE)
     {
-        size_t remaining_size = blockSize(blk) - newsize;        
+        size_t remaining_size = blockSize(blk) - newsize;
+
+        /*change current block's size to newsize*/  
         setBlockSize(blk, newsize);
         setAllocStatus(blk, ALLOCATED);
     
         size_t* remaining_block = nextBlock(blk);
+
+        /*set remaining block's size and coalesce it*/
         setBlockSize(remaining_block, remaining_size);
         setAllocStatus(remaining_block, FREE);
         coalesce(remaining_block);
@@ -258,10 +274,10 @@ void allocSplit(size_t total, size_t taken, size_t* taken_blk)
         size_t* remains_blk = nextBlock(taken_blk);
         setBlockSize(remains_blk, total - taken);
         setAllocStatus(remains_blk, FREE);
-
-        /*add remaining memory to appropriate free list*/
-        size_t* free_list_h = bins[findBin(blockSize(remains_blk))];
-        insertFreeBlock(free_list_h, remains_blk); /*both alloc and realloc returns the remaining memory to head of free list*/
+        
+        /*coalesce remaining memory with any adjacent free block*/
+        setAllocStatus(taken_blk, ALLOCATED);
+        coalesce(remains_blk);
     }
     setAllocStatus(taken_blk, ALLOCATED);  /*mark taken_blk as ALLOCATED*/
 }
@@ -282,10 +298,11 @@ void* coalesce(size_t* to_free)
     /*next block free, previous block allocated*/
     else if (allocStatus(nextBlock(to_free)) == FREE && allocStatus(to_free - 1) == ALLOCATED)
     {
-        /*splice*/
+        /*splice free next block*/
         size_t* next_block_head = nextBlock(to_free);
         splice(next_block_head);
 
+        /*change to total size*/
         setBlockSize(to_free, blockSize(to_free) + blockSize(next_block_head));
         setAllocStatus(to_free, FREE);
 
@@ -298,9 +315,11 @@ void* coalesce(size_t* to_free)
     /*previous block free, next block allocated*/
     else if (allocStatus(nextBlock(to_free)) == ALLOCATED && allocStatus(to_free - 1) == FREE)
     {
+        /*splice free prev block*/
         size_t *prev_block_head = prevBlock(to_free);
         splice(prev_block_head);
 
+        /*change to total size*/
         setBlockSize(prev_block_head, blockSize(prev_block_head) + blockSize(to_free));
         setAllocStatus(prev_block_head, FREE);
 
@@ -313,12 +332,15 @@ void* coalesce(size_t* to_free)
     /*previous and next free*/
     else
     {        
+        /*splice free prev block*/
         size_t* prev_block_head = prevBlock(to_free);
         splice(prev_block_head);
 
+        /*splice free next block*/
         size_t* next_block_head = nextBlock(to_free);
         splice(next_block_head);
 
+        /*change to total size*/
         setBlockSize(prev_block_head, blockSize(prev_block_head) + blockSize(to_free) + blockSize(next_block_head));
         setAllocStatus(prev_block_head, FREE);
 
